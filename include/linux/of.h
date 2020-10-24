@@ -136,7 +136,9 @@ static inline unsigned long of_read_ulong(const __be32 *cell, int size)
 	return of_read_number(cell, size);
 }
 
+#if defined(CONFIG_SPARC)
 #include <asm/prom.h>
+#endif
 
 /* Default #address and #size cells.  Allow arch asm/prom.h to override */
 #if !defined(OF_ROOT_NODE_ADDR_CELLS_DEFAULT)
@@ -266,6 +268,7 @@ extern int of_device_is_available(const struct device_node *device);
 extern const void *of_get_property(const struct device_node *node,
 				const char *name,
 				int *lenp);
+extern struct device_node *of_get_cpu_node(int cpu, unsigned int *thread);
 #define for_each_property_of_node(dn, pp) \
 	for (pp = dn->properties; pp != NULL; pp = pp->next)
 
@@ -285,7 +288,9 @@ extern int of_count_phandle_with_args(const struct device_node *np,
 
 extern void of_alias_scan(void * (*dt_alloc)(u64 size, u64 align));
 extern int of_alias_get_id(struct device_node *np, const char *stem);
-
+#ifdef CONFIG_OF_SUBCMDLINE_PARSE
+extern int of_parse_args_on_subcmdline(const char *name, char *buf);
+#endif
 extern int of_machine_is_compatible(const char *compat);
 
 extern int of_add_property(struct device_node *np, struct property *prop);
@@ -455,6 +460,12 @@ static inline int of_property_count_strings(struct device_node *np,
 static inline const void *of_get_property(const struct device_node *node,
 				const char *name,
 				int *lenp)
+{
+	return NULL;
+}
+
+static inline struct device_node *of_get_cpu_node(int cpu,
+					unsigned int *thread)
 {
 	return NULL;
 }

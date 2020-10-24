@@ -404,6 +404,7 @@ static int sched_debug_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+#ifdef CONFIG_SYSRQ_SCHED_DEBUG
 void sysrq_sched_debug_show(void)
 {
 	int cpu;
@@ -413,6 +414,7 @@ void sysrq_sched_debug_show(void)
 		print_cpu(NULL, cpu);
 
 }
+#endif
 
 /*
  * This itererator needs some explanation.
@@ -545,6 +547,11 @@ void proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 	P(se.statistics.nr_wakeups_affine_attempts);
 	P(se.statistics.nr_wakeups_passive);
 	P(se.statistics.nr_wakeups_idle);
+
+#if defined(CONFIG_SMP) && defined(CONFIG_FAIR_GROUP_SCHED)
+	P(se.avg.runnable_avg_sum);
+	P(se.avg.runnable_avg_period);
+#endif
 
 	{
 		u64 avg_atom, avg_per_cpu;

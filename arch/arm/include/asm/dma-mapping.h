@@ -15,6 +15,14 @@
 extern struct dma_map_ops arm_dma_ops;
 extern struct dma_map_ops arm_coherent_dma_ops;
 
+#if defined(CONFIG_DEBUG_CMA_TRACE)
+extern struct mutex allocation_lock;
+extern unsigned long dma_requested_allocation;
+extern unsigned long dma_actual_allocation;
+extern unsigned long dma_last_actual_allocation;
+extern unsigned long dma_peak_allocation;
+#endif
+
 static inline struct dma_map_ops *get_dma_ops(struct device *dev)
 {
 	if (dev && dev->archdata.dma_ops)
@@ -114,6 +122,39 @@ extern int dma_supported(struct device *dev, u64 mask);
 
 extern int arm_dma_set_mask(struct device *dev, u64 dma_mask);
 
+/*
+ * dma_coherent_pre_ops - barrier functions for coherent memory before DMA.
+ * A barrier is required to ensure memory operations are complete before the
+ * initiation of a DMA xfer.
+ * If the coherent memory is Strongly Ordered
+ * - pre ARMv7 and 8x50 guarantees ordering wrt other mem accesses
+ * - ARMv7 guarantees ordering only within a 1KB block, so we need a barrier
+ * If coherent memory is normal then we need a barrier to prevent
+ * reordering
+ */
+static inline void dma_coherent_pre_ops(void)
+{
+#if COHERENT_IS_NORMAL == 1
+	dmb();
+#else
+	barrier();
+#endif
+}
+/*
+ * dma_post_coherent_ops - barrier functions for coherent memory after DMA.
+ * If the coherent memory is Strongly Ordered we dont need a barrier since
+ * there are no speculative fetches to Strongly Ordered memory.
+ * If coherent memory is normal then we need a barrier to prevent reordering
+ */
+static inline void dma_coherent_post_ops(void)
+{
+#if COHERENT_IS_NORMAL == 1
+	dmb();
+#else
+	barrier();
+#endif
+}
+
 /**
  * arm_dma_alloc - allocate consistent memory for DMA
  * @dev: valid struct device pointer, or NULL for ISA and EISA-like devices
@@ -140,6 +181,33 @@ static inline void *dma_alloc_attrs(struct device *dev, size_t size,
 
 	cpu_addr = ops->alloc(dev, size, dma_handle, flag, attrs);
 	debug_dma_alloc_coherent(dev, size, *dma_handle, cpu_addr);
+#if defined(CONFIG_DEBUG_CMA_TRACE)
+	if(!dev || !dev->cma_area) {
+		mutex_lock(&allocation_lock);
+		pr_info("dma_alloc_coherent:size %u bytes requested for dev %s function %pS\n",
+		size, (dev)? dev_name(dev) : "NULL", __builtin_return_address(0));
+		if (size <= SZ_4K) {
+			dma_actual_allocation += SZ_4K;
+			pr_info("dma_alloc_coherent: actual allocation = %d\n",SZ_4K);
+		} else {
+			dma_actual_allocation += roundup_pow_of_two(size);
+			pr_info("dma_alloc_coherent: actual allocation = %lu\n", roundup_pow_of_two(size));
+		}
+		dma_requested_allocation += size;
+
+		if (dma_actual_allocation > dma_last_actual_allocation) {
+			dma_peak_allocation = dma_actual_allocation;
+			dma_last_actual_allocation = dma_actual_allocation;
+		}
+
+		pr_info("Total req alloc = %lu Total act alloc = %lu\n",
+			dma_requested_allocation, dma_actual_allocation);
+		pr_info("Total peak alloc = %lu alloc virt address=%p phy addr%p\n",
+			dma_peak_allocation, cpu_addr, dma_handle);
+		mutex_unlock(&allocation_lock);
+		BUG_ON(!cpu_addr);
+	}
+#endif
 	return cpu_addr;
 }
 
@@ -169,6 +237,28 @@ static inline void dma_free_attrs(struct device *dev, size_t size,
 	struct dma_map_ops *ops = get_dma_ops(dev);
 	BUG_ON(!ops);
 
+#if defined(CONFIG_DEBUG_CMA_TRACE)
+	if(!dev || !dev->cma_area) {
+		mutex_lock(&allocation_lock);
+		pr_info("dma_free_coherent:size %u bytes freed for dev %s function %pS\n",
+		size, (dev)? dev_name(dev) : "NULL", __builtin_return_address(0));
+		if (size <= SZ_4K) {
+			dma_actual_allocation -= SZ_4K;
+			pr_info("if:dma_free_coherent: actual freed = %d\n",SZ_4K);
+		} else {
+			dma_actual_allocation -= roundup_pow_of_two(size);
+			pr_info("else:dma_free_coherent: Total actual freed = %lu\n",
+			roundup_pow_of_two(size));
+		}
+		dma_requested_allocation -= size;
+		pr_info("dma_free_coherent: Total requested allocation after freed = %lu\n",
+		dma_requested_allocation);
+
+		pr_info("dma_free_coherent: Total actual allocation after freed = %lu\n",
+		dma_actual_allocation);
+		mutex_unlock(&allocation_lock);
+	}
+#endif
 	debug_dma_free_coherent(dev, size, cpu_addr, dma_handle);
 	ops->free(dev, size, cpu_addr, dma_handle, attrs);
 }
@@ -204,6 +294,56 @@ static inline void dma_free_writecombine(struct device *dev, size_t size,
 	DEFINE_DMA_ATTRS(attrs);
 	dma_set_attr(DMA_ATTR_WRITE_COMBINE, &attrs);
 	return dma_free_attrs(dev, size, cpu_addr, dma_handle, &attrs);
+}
+
+static inline void *dma_alloc_stronglyordered(struct device *dev, size_t size,
+				       dma_addr_t *dma_handle, gfp_t flag)
+{
+	DEFINE_DMA_ATTRS(attrs);
+	dma_set_attr(DMA_ATTR_STRONGLY_ORDERED, &attrs);
+	return dma_alloc_attrs(dev, size, dma_handle, flag, &attrs);
+}
+
+static inline void dma_free_stronglyordered(struct device *dev, size_t size,
+				     void *cpu_addr, dma_addr_t dma_handle)
+{
+	DEFINE_DMA_ATTRS(attrs);
+	dma_set_attr(DMA_ATTR_STRONGLY_ORDERED, &attrs);
+	return dma_free_attrs(dev, size, cpu_addr, dma_handle, &attrs);
+}
+
+static inline int dma_mmap_stronglyordered(struct device *dev,
+		struct vm_area_struct *vma, void *cpu_addr,
+		dma_addr_t dma_addr, size_t size)
+{
+	DEFINE_DMA_ATTRS(attrs);
+	dma_set_attr(DMA_ATTR_STRONGLY_ORDERED, &attrs);
+	return dma_mmap_attrs(dev, vma, cpu_addr, dma_addr, size, &attrs);
+}
+
+static inline void *dma_alloc_nonconsistent(struct device *dev, size_t size,
+				       dma_addr_t *dma_handle, gfp_t flag)
+{
+	DEFINE_DMA_ATTRS(attrs);
+	dma_set_attr(DMA_ATTR_NON_CONSISTENT, &attrs);
+	return dma_alloc_attrs(dev, size, dma_handle, flag, &attrs);
+}
+
+static inline void dma_free_nonconsistent(struct device *dev, size_t size,
+				     void *cpu_addr, dma_addr_t dma_handle)
+{
+	DEFINE_DMA_ATTRS(attrs);
+	dma_set_attr(DMA_ATTR_NON_CONSISTENT, &attrs);
+	return dma_free_attrs(dev, size, cpu_addr, dma_handle, &attrs);
+}
+
+static inline int dma_mmap_nonconsistent(struct device *dev,
+		struct vm_area_struct *vma, void *cpu_addr,
+		dma_addr_t dma_addr, size_t size)
+{
+	DEFINE_DMA_ATTRS(attrs);
+	dma_set_attr(DMA_ATTR_NON_CONSISTENT, &attrs);
+	return dma_mmap_attrs(dev, vma, cpu_addr, dma_addr, size, &attrs);
 }
 
 /*
@@ -252,7 +392,55 @@ extern int dmabounce_register_dev(struct device *, unsigned long,
  */
 extern void dmabounce_unregister_dev(struct device *);
 
+/**
+ * dma_cache_pre_ops - clean or invalidate cache before dma transfer is
+ *                     initiated and perform a barrier operation.
+ * @virtual_addr: A kernel logical or kernel virtual address
+ * @size: size of buffer to map
+ * @dir: DMA transfer direction
+ *
+ * Ensure that any data held in the cache is appropriately discarded
+ * or written back.
+ *
+ */
+static inline void dma_cache_pre_ops(void *virtual_addr,
+		size_t size, enum dma_data_direction dir)
+{
+	extern void ___dma_single_cpu_to_dev(const void *, size_t,
+		enum dma_data_direction);
 
+	BUG_ON(!valid_dma_direction(dir));
+
+	___dma_single_cpu_to_dev(virtual_addr, size, dir);
+}
+
+/**
+ * dma_cache_post_ops - clean or invalidate cache after dma transfer is
+ *                     initiated and perform a barrier operation.
+ * @virtual_addr: A kernel logical or kernel virtual address
+ * @size: size of buffer to map
+ * @dir: DMA transfer direction
+ *
+ * Ensure that any data held in the cache is appropriately discarded
+ * or written back.
+ *
+ */
+static inline void dma_cache_post_ops(void *virtual_addr,
+		size_t size, enum dma_data_direction dir)
+{
+	extern void ___dma_single_cpu_to_dev(const void *, size_t,
+		enum dma_data_direction);
+
+	BUG_ON(!valid_dma_direction(dir));
+
+	if (arch_has_speculative_dfetch() && dir != DMA_TO_DEVICE)
+		/*
+		 * Treat DMA_BIDIRECTIONAL and DMA_FROM_DEVICE
+		 * identically: invalidate
+		 */
+		___dma_single_cpu_to_dev(virtual_addr,
+					 size, DMA_FROM_DEVICE);
+}
 
 /*
  * The scatter list versions of the above methods.
